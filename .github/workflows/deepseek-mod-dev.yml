@@ -1,0 +1,154 @@
+name: DeepSeek Mod Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      requirement:
+        description: '需求描述：要修改模组的什么（如：把境界1-3阶的数值改成XX）'
+        required: true
+        type: string
+      target_files:
+        description: '指定要改的文件（相对路径，逗号分隔；留空自动给关键文件）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  modify-mod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取模组仓库并收集上下文
+        run: |
+          git clone --depth 1 https://github.com/Ninefish-yj/GeneCultivation.git /tmp/gc
+          cd /tmp/gc
+          python3 -c "import json;print(json.load(open('mod.json'))['version'])" > /tmp/ver.txt
+          echo "cloned"
+
+      - name: DeepSeek 按需求修改
+        env:
+          DS_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REQ: ${{ github.event.inputs.requirement }}
+          FILES: ${{ github.event.inputs.target_files }}
+        run: |
+          set -e
+          if [ -z "$DS_KEY" ]; then
+            echo "::error::未配置 DEEPSEEK_API_KEY（仓库 Settings→Secrets→Actions 添加）"
+            exit 1
+          fi
+          python3 - <<'PYEOF'
+          import json, os, urllib.request, datetime
+
+          key = os.environ["DS_KEY"]
+          req = os.environ.get("REQ", "")
+          spec = os.environ.get("FILES", "").strip()
+          version = open("/tmp/ver.txt").read().strip()
+          date = datetime.date.today().isoformat()
+
+          # 默认关键文件（无指定时）；有指定则只用指定文件
+          default_paths = [
+              "ModClass.cs",
+              "README.md",
+              "mod.json",
+              "Code/Realm/Genome/GenomeCultivationProgress.cs",
+              "Code/Realm/Genome/GenomeData.cs",
+              "Code/Realm/Genome/GenomeEditorBridge.cs",
+              "Code/UI/UnitGeneTabPanel.cs",
+          ]
+          if spec:
+              paths = [p.strip() for p in spec.split(",") if p.strip()]
+          else:
+              paths = default_paths
+
+          files = {}
+          for p in paths:
+              fp = "/tmp/gc/" + p
+              if os.path.isfile(fp):
+                  try:
+                      files[p] = open(fp, encoding="utf-8", errors="replace").read()[:6000]
+                  except Exception:
+                      pass
+
+          ctx = "\n\n".join("### " + p + "\n" + files[p] for p in files)
+          prompt = f"""你是 WorldBox 模组「基因修炼 GeneCultivation」（NML/Harmony C#，GitHub: Ninefish-yj/GeneCultivation）的开发助手。
+用户需求：{req}
+硬约束：1) 机制/名称/数值必须出自原著设定原文，自研内容禁止进入模组；2) 被否决的系统整个删除；3) 无残留/死代码；4) 改动需同步版本号（当前 {version}）与文档。
+相关文件内容：
+{ctx}
+请按需求修改代码。只输出一个 JSON（不要 Markdown 包裹，不要注释）：
+{{"files": {{"相对路径": "修改后的完整文件内容"}}, "summary": "改动说明（中文，按点列出）", "version": "建议新版本号"}}
+未修改的文件不要放进 files。若需求无法在给定文件内完成，在 summary 说明缺什么。"""
+
+          body = json.dumps({
+              "model": "deepseek-chat",
+              "messages": [{"role": "user", "content": prompt}],
+              "stream": False,
+              "max_tokens": 8000,
+          }).encode()
+          rq = urllib.request.Request("https://api.deepseek.com/chat/completions", data=body,
+              headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+          with urllib.request.urlopen(rq, timeout=300) as r:
+              data = json.loads(r.read().decode())
+          content = data["choices"][0]["message"]["content"]
+
+          # 解析 JSON（容忍 ```json 包裹）
+          text = content.strip()
+          if text.startswith("```"):
+              lines = text.splitlines()
+              lines = [l for l in lines if not l.startswith("```")]
+              text = "\n".join(lines)
+          j = json.loads(text)
+
+          # 应用修改到模组仓库 clone
+          applied = []
+          for p, newc in j.get("files", {}).items():
+              tgt = "/tmp/gc/" + p
+              try:
+                  os.makedirs(os.path.dirname(tgt), exist_ok=True)
+                  open(tgt, "w", encoding="utf-8").write(newc)
+                  applied.append(p)
+              except Exception as e:
+                  print("skip", p, e)
+          meta = {"date": date, "requirement": req,
+                  "summary": j.get("summary", ""), "version": j.get("version", version),
+                  "files": applied}
+          open("/tmp/meta.json", "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False, indent=2))
+          print("DeepSeek 输出完成，修改文件数:", len(applied))
+          PYEOF
+
+      - name: 生成产物并提交云端仓库
+        run: |
+          set -e
+          cd /tmp/gc
+          git diff > /tmp/cloud.patch 2>/dev/null || true
+          OUT="$GITHUB_WORKSPACE/cloud-output"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          cp /tmp/meta.json "$OUT/changes.json"
+          cp /tmp/cloud.patch "$OUT/mod.diff"
+          # 修改后文件副本（方便手机直接查看）
+          python3 - <<'PYEOF'
+          import json, os, shutil
+          meta = json.load(open("/tmp/meta.json", encoding="utf-8"))
+          out = os.path.join(os.environ["GITHUB_WORKSPACE"], "cloud-output")
+          for p in meta.get("files", []):
+              src = "/tmp/gc/" + p
+              if os.path.isfile(src):
+                  tgt = os.path.join(out, "files", p)
+                  os.makedirs(os.path.dirname(tgt), exist_ok=True)
+                  shutil.copy(src, tgt)
+          PYEOF
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "GC-CloudBot"
+          git config user.email "cloudbot@users.noreply.github.com"
+          git add cloud-output
+          if git diff --cached --quiet; then
+            echo "产物无变化，跳过提交"
+          else
+            git commit -m "[skip ci] cloud: 按需求修改模组 $(date +%F)"
+            git push origin main
+            echo "已提交到云端仓库 cloud-output/"
+          fi

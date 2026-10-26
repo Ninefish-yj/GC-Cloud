@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 |---|---|
-| `.github/workflows/deepseek-cloud.yml` | GitHub Actions：定时（每天 UTC 18:00）+ 手动触发，云端用 DeepSeek 审查模组仓库最新状态，生成状态报告与更新日志 |
+| `.github/workflows/deepseek-mod-dev.yml` | GitHub Actions：手动触发（填需求），云端用 DeepSeek 按需求修改模组代码，产物提交到 `cloud-output/`（变更说明 + diff + 修改后文件） |
 | `.cursorrules` | Cursor 项目规则（AI 助手用 DeepSeek 时参考；如需应用到模组开发，可拷贝到模组仓库根目录） |
 | `AGENTS.md` | 通用 AI 助手指令（同上） |
 | `CHANGELOG.md` | 云端自动累积的更新日志 |
@@ -21,13 +21,19 @@
    ```
 2. GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**：
    - Name：`DEEPSEEK_API_KEY`
-   - Value：你的 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com) 申请）
-3. 运行：Actions → **DeepSeek Cloud Workflow** → Run workflow（手动）；或等每日定时自动跑
+   - Value：你的 DeepSeek API Key（[platform.deepseek.com](https://platform.deepseek.com) 申请，**需充值后有余额才能调用**）
+3. 使用：Actions → **DeepSeek Mod Dev** → Run workflow → 填 **需求描述**（必填）→ 可选填 **目标文件** → 运行
 
-## 产物
+## 产物（提交在 `cloud-output/` 目录）
 
-- `.github/review-reports/latest-review.md` — 最新云端状态报告
-- `CHANGELOG.md` — 累积更新日志
+- `changes.json` — 需求、改动说明、建议版本号、修改文件清单
+- `mod.diff` — 相对模组仓库的完整 diff（补丁）
+- `files/` — 修改后的文件副本（手机可直接查看）
+
+## 说明
+
+- 云端 DeepSeek 只能修改**给它看的文件**（默认关键文件清单，或你指定目标文件）——适合明确的单点修改（数值/文案/配置/小功能）；复杂跨文件开发建议直接在模组仓库用 AI 助手完成。
+- 改动不会直接写入模组仓库（避免无授权跨仓库写入）；确认无误后可手动合入。
 
 ## 与模组仓库的边界
 

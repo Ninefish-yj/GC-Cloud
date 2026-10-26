@@ -1,0 +1,100 @@
+name: DeepSeek Cloud Workflow
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * *'   # 每天 UTC 18:00（北京时间次日 02:00）自动审查模组仓库
+
+permissions:
+  contents: write
+
+jobs:
+  cloud-assist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取模组仓库最新代码
+        run: |
+          git clone --depth 50 https://github.com/Ninefish-yj/GeneCultivation.git /tmp/gc
+          cd /tmp/gc
+          git log -1 --format="%H %s" > /tmp/head.txt
+          python3 -c "import json;print(json.load(open('mod.json'))['version'])" > /tmp/ver.txt 2>/dev/null || echo unknown > /tmp/ver.txt
+          git log -12 --pretty=format:"%h %s" > /tmp/recent_commits.txt
+          git diff HEAD~1..HEAD --stat > /tmp/last_diff_stat.txt 2>/dev/null || true
+
+      - name: DeepSeek 审查与更新日志
+        env:
+          DS_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -e
+          if [ -z "$DS_KEY" ]; then
+            echo "::warning::未配置 DEEPSEEK_API_KEY，跳过云端审查（仓库 Settings→Secrets 添加）"
+            exit 0
+          fi
+          python3 - <<'PYEOF'
+          import json, os, urllib.request, datetime
+
+          key = os.environ["DS_KEY"]
+          version = open("/tmp/ver.txt").read().strip()
+          head = open("/tmp/head.txt").read().strip()
+          commits = open("/tmp/recent_commits.txt", encoding="utf-8", errors="replace").read()
+          stat = ""
+          try:
+              stat = open("/tmp/last_diff_stat.txt", encoding="utf-8", errors="replace").read()
+          except FileNotFoundError:
+              pass
+          date = datetime.date.today().isoformat()
+
+          def call(prompt):
+              body = json.dumps({
+                  "model": "deepseek-chat",
+                  "messages": [{"role": "user", "content": prompt}],
+                  "stream": False,
+                  "max_tokens": 2000,
+              }).encode()
+              req = urllib.request.Request("https://api.deepseek.com/chat/completions", data=body,
+                  headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  data = json.loads(r.read().decode())
+              return data["choices"][0]["message"]["content"]
+
+          # 1) 代码状态审查（定时/手动：无完整 diff，用最近提交+改动统计）
+          review = call(f"""你是资深 Unity C# 模组代码审查员，审查 WorldBox 模组「基因修炼 GeneCultivation」（NML/Harmony 运行时编译）。
+          项目硬约束：1) 机制/名称/数值必须出自原著设定原文，自研内容禁止进入模组；2) 被否决的系统整个删除；3) 无残留/死代码/臃肿；4) 改动需同步文档与版本号。
+          模组最新版本 {version}，最近提交：\n{commits}\n最近一次改动统计：\n{stat}\n当前 HEAD：{head}
+          输出中文 Markdown 状态报告：
+          ## 云端状态报告（{version}）
+          ### 最近动态
+          ### 风险与建议（按严重度）
+          - [严重/中等/轻微] 问题与建议
+          ### 下一步建议（3 行内）""")
+
+          os.makedirs(".github/review-reports", exist_ok=True)
+          open(".github/review-reports/latest-review.md", "w", encoding="utf-8").write(review + "\n")
+
+          # 2) 更新日志（按版本）
+          log = call(f"""你是游戏模组发布文案助手。模组「基因修炼 GeneCultivation」版本 {version}，最近提交：\n{commits}\n生成中文更新说明（分类列出主要改动，简洁，无需重复版本号）。""")
+          entry = f"## {version}（{date}）\n\n{log}\n"
+          changelog = ""
+          try:
+              changelog = open("CHANGELOG.md", encoding="utf-8").read()
+          except FileNotFoundError:
+              pass
+          header = "# 云端更新日志\n\n"
+          rest = changelog
+          if rest.startswith(header):
+              rest = rest[len(header):]
+          open("CHANGELOG.md", "w", encoding="utf-8").write(header + entry + rest)
+          print("cloud assist done")
+          PYEOF
+
+      - name: 回写云端仓库
+        run: |
+          set -e
+          git config user.name "GC-CloudBot"
+          git config user.email "cloudbot@users.noreply.github.com"
+          git add CHANGELOG.md .github/review-reports/latest-review.md
+          git diff --cached --quiet && echo "无变更" && exit 0
+          git commit -m "[skip ci] cloud: 状态报告与更新日志"
+          git push origin main

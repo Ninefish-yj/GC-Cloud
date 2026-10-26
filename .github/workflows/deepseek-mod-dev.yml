@@ -23,7 +23,8 @@ jobs:
 
       - name: 拉取模组仓库并收集上下文
         run: |
-          git clone --depth 1 https://github.com/Ninefish-yj/GeneCultivation.git /tmp/gc
+          # 私有仓库认证：用 GC_GITHUB_PAT（Secret）跨仓库拉取模组仓库
+          git clone --depth 1 https://x-access-token:${{ secrets.GC_GITHUB_PAT }}@github.com/Ninefish-yj/GeneCultivation.git /tmp/gc
           cd /tmp/gc
           python3 -c "import json;print(json.load(open('mod.json'))['version'])" > /tmp/ver.txt
           echo "cloned"
